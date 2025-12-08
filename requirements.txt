@@ -1,0 +1,17 @@
+torch>=1.12.0
+torchaudio>=0.12.0
+librosa>=0.9.0
+soundfile>=0.10.0
+numpy>=1.21.0
+scipy>=1.7.0
+pyyaml>=6.0
+tensorboard>=2.10.0
+tqdm>=4.64.0
+pesq>=0.0.3
+pystoi>=0.3.3
+torchmetrics>=0.11.0
+matplotlib>=3.5.0
+transformers>=4.20.0
+fairseq>=0.12.0
+
+
