@@ -4,24 +4,19 @@ import torch.nn.functional as F
 import torchaudio
 from models.generator import EncoderBlock # 复用生成器的编码块
 from models.components.temporal_aggregation import TemporalAggregationModule
+from models.components.semantic_extractor import SemanticExtractor
 
+
+# models/detector.py
+import torch
+import torch.nn as nn
 from models.components.semantic_extractor import SemanticExtractor
 
 class NeuroGuardDetector(nn.Module):
-    """
-    语义增强型检测器 (Semantic-Aware Detector)
-    
-    架构变革：
-    原架构：Waveform -> SEANet/CNN -> Bits
-    新架构：Waveform -> Frozen HuBERT (Semantic) -> Lightweight Head -> Bits
-    
-    优势：与 Generator 在同一个语义空间对话，极大降低学习难度。
-    """
     def __init__(self, config):
         super().__init__()
         
-        # 1. 语义提取器 (与 Generator 保持一致的配置)
-        # 必须 freeze=True，否则显存爆炸且难以训练
+        # 1. 语义提取器
         semantic_config = config['model']['generator']['semantic']
         self.semantic_extractor = SemanticExtractor(
             model_type=semantic_config.get('model_type', 'hubert'),
@@ -29,80 +24,54 @@ class NeuroGuardDetector(nn.Module):
             freeze=True 
         )
         
-        # 获取语义特征维度 (例如 HuBERT-Large=1024, Base=768)
         sem_dim = self.semantic_extractor.get_feature_dim()
         msg_bits = config['model']['generator']['message_bits']
         
-        # 2. 轻量级解码头 (Decoder Head)
-        # 只需要简单的几层卷积就能从语义特征中提取 FSQ 的痕迹
-        # 结构：降维 -> 时序聚合 -> 最终分类
-        self.decoder_head = nn.Sequential(
-            # Layer 1: 语义特征降维与初步整合
+        # 2. 解码头 - 拆分为两层，避免手动索引出错
+        # Layer 1: 降维 (1024 -> 512)
+        self.head_layer1 = nn.Sequential(
             nn.Conv1d(sem_dim, 512, kernel_size=3, padding=1),
             nn.GroupNorm(8, 512),
-            nn.GELU(),
-            
-            # Layer 2: 进一步特征提取
-            nn.Conv1d(512, 256, kernel_size=3, padding=1),
-            nn.GroupNorm(8, 256),
-            nn.GELU(),
-            
-            # Layer 3: 映射到消息空间
-            nn.Conv1d(256, msg_bits, kernel_size=1)
+            nn.GELU()
         )
         
-        # 3. 定位头 (Localization Head) - 可选，用于辅助任务
-        # 输出 (B, 1, T) 的掩码，指示哪里有水印
+        # Layer 2: 进一步提取 (512 -> 256)
+        self.head_layer2 = nn.Sequential(
+            nn.Conv1d(512, 256, kernel_size=3, padding=1),
+            nn.GroupNorm(8, 256),
+            nn.GELU()
+        )
+        
+        # Layer 3: 最终解码 (256 -> Bits)
+        self.head_out = nn.Conv1d(256, msg_bits, kernel_size=1)
+        
+        # 3. 定位头 (256 -> 1)
         self.loc_head = nn.Sequential(
             nn.Conv1d(256, 128, kernel_size=3, padding=1),
             nn.GELU(),
             nn.Conv1d(128, 1, kernel_size=1)
         )
+        
+        # 为了兼容 train.py 里的梯度检查代码，保留 decoder_head 引用
+        # 这是一个小 trick，让 train.py 不报错
+        self.decoder_head = nn.ModuleList([self.head_layer1, self.head_layer2, self.head_out])
 
     def forward(self, x):
-        """
-        Args:
-            x: (B, 1, T) 音频波形
-        Returns:
-            loc_logits: (B, 1, T_sem) 定位 logits
-            msg_logits: (B, Bits) 全局消息 logits
-        """
-        # 1. 提取语义特征
-        # 注意：虽然 extractor 是冻结的，但 x.requires_grad=True，
-        # 所以梯度可以穿过 extractor 回传给 x，从而指导 Generator。
-        # features: (B, sem_dim, T_sem)
-        if x.dim() == 3 and x.shape[1] == 1:
-            x_in = x.squeeze(1)
-        else:
-            x_in = x
+        # 1. 提取语义
         features = self.semantic_extractor(x)
         
-        # 2. 解码过程
-        # 中间特征
-        mid_feats = self.decoder_head[0](features)
-        mid_feats = self.decoder_head[1](mid_feats)
-        mid_feats = self.decoder_head[2](mid_feats) # mid_feats 此时是 Layer 2 的输出
+        # 2. 逐层传递 (解决 RuntimeError 的关键)
+        x1 = self.head_layer1(features) # -> 512
+        x2 = self.head_layer2(x1)       # -> 256
         
-        # 为了复用 sequential，我们手动拆解一下或者重新定义 forward 逻辑
-        # 这里为了简单，我们重新定义一下流向：
+        # 3. 分支输出
+        # 定位 (输入必须是 256)
+        loc_logits = self.loc_head(x2)
         
-        h = features
-        h = self.decoder_head[0](h)
-        h = self.decoder_head[1](h) # (B, 256, T_sem)
+        # 消息
+        token_logits = self.head_out(x2)
+        msg_logits = token_logits.mean(dim=-1)
         
-        # 分支 A: 消息解码 (Message Decoding)
-        # (B, 256, T) -> (B, Bits, T)
-        token_logits = self.decoder_head[2](h)
-        
-        # 全局聚合：对时间维度取平均 (Global Average Pooling)
-        # 假设水印是全局重复或全局分布的
-        msg_logits = token_logits.mean(dim=-1) # (B, Bits)
-        
-        # 分支 B: 定位 (Localization)
-        loc_logits = self.loc_head(h) # (B, 1, T_sem)
-        
-        # 兼容旧代码的返回值格式 (loc, msg, local, attention)
-        # 我们这里不需要 local 和 attention，返回 None
         return loc_logits, msg_logits, None, None
 
 # class NeuroGuardDetector(nn.Module):

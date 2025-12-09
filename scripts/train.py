@@ -90,7 +90,7 @@ def train(config_path, resume_checkpoint=None):
         config = yaml.safe_load(f)
 
     # Device
-    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Create directories
@@ -384,6 +384,7 @@ def train(config_path, resume_checkpoint=None):
             
             # 2. 生成水印音频
             audio_wm, watermark_res, indices = generator(audio_real, msg)
+            # audio_wm.retain_grad()
             
             # 3. 施加攻击
             if test_mode:
@@ -499,8 +500,29 @@ def train(config_path, resume_checkpoint=None):
             total_loss_D = loss_loc + loss_msg
             
             # Optimization - Generator
+            # Optimization - Generator
             opt_G.zero_grad()
             total_loss_G.backward(retain_graph=False)
+            
+            # [新增] === 梯度探针 (Gradient Probe) ===
+            # 只有在 debug 时打开，确认 Generator 是否收到了 Detector 的反馈
+            # if step % 100 == 0:
+            #     print("\n[Gradient Check]")
+            #     if audio_wm.grad is not None:
+            #         grad_norm = audio_wm.grad.norm().item()
+            #         print(f"  Audio WM Grad Norm: {grad_norm:.6f} (Should be > 0)")
+            #         if grad_norm == 0.0:
+            #             print("  🔴 警告: 梯度断流！Generator 收不到反馈！")
+            #     else:
+            #         print("  🔴 严重警告: Audio WM 没有梯度 (None)！")
+                    
+            #     # 检查 Decoder Head 是否有梯度
+            #     for name, param in detector.decoder_head.named_parameters():
+            #         if param.grad is not None:
+            #             print(f"  Detector Head Grad: {param.grad.norm().item():.6f}")
+            #             break
+            # ========================================
+
             torch.nn.utils.clip_grad_norm_(generator.parameters(), 1.0)
             opt_G.step()
             
