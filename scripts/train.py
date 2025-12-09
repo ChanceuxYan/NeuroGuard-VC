@@ -30,7 +30,7 @@ def train(config_path, resume_checkpoint=None):
         config = yaml.safe_load(f)
 
     # Device
-    device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
     # Create directories
@@ -235,7 +235,21 @@ def train(config_path, resume_checkpoint=None):
         print(f"Loading checkpoint from {resume_checkpoint}")
         checkpoint = torch.load(resume_checkpoint, map_location=device)
         generator.load_state_dict(checkpoint['generator'])
-        detector.load_state_dict(checkpoint['detector'])
+        
+        # Detector加载：兼容旧checkpoint（ConvTranspose -> Upsample+Conv结构变化）
+        try:
+            detector.load_state_dict(checkpoint['detector'], strict=True)
+            print("✓ Loaded detector")
+        except RuntimeError as e:
+            print("⚠ Warning: Detector structure mismatch, attempting partial load...")
+            missing_keys, unexpected_keys = detector.load_state_dict(checkpoint['detector'], strict=False)
+            if missing_keys:
+                print(f"  Missing keys ({len(missing_keys)}): {missing_keys[:5]}{'...' if len(missing_keys) > 5 else ''}")
+            if unexpected_keys:
+                print(f"  Unexpected keys ({len(unexpected_keys)}): {unexpected_keys[:5]}{'...' if len(unexpected_keys) > 5 else ''}")
+            print("✓ Loaded detector (partial, mismatched layers will be retrained)")
+            file_logger.warning(f"Detector partial load: {len(missing_keys)} missing, {len(unexpected_keys)} unexpected")
+        
         opt_G.load_state_dict(checkpoint['opt_G'])
         opt_D.load_state_dict(checkpoint['opt_D'])
         start_epoch = checkpoint.get('epoch', 0)
@@ -414,8 +428,14 @@ def train(config_path, resume_checkpoint=None):
             
             # --- Loss Calculation ---
             
-            # A. Generator Losses (Perceptual)
+            # A. 感知损失 (STFT)
             loss_stft = stft_criterion(audio_wm, audio_real)
+            
+            # 新增：残差能量惩罚 (Residual Penalty)
+            # watermark_res 是 generator 返回的第二个变量 (即 watermark_masked)
+            # 这一项迫使 Generator "能省则省"，用最小的能量传达信息
+            # loss_res_energy = torch.mean(watermark_res ** 2)
+            loss_res_energy = 0
             
             # B. Generator的消息解码损失
             # 注意：detector处于eval模式（参数固定），但audio_attacked保持梯度
@@ -467,9 +487,17 @@ def train(config_path, resume_checkpoint=None):
                 lambda_msg_current = config['training']['lambda_msg']
             
             # Combined Loss for Generator
-            total_loss_G = (config['training']['lambda_perceptual'] * loss_stft) + \
+            lambda_perc = config['training']['lambda_perceptual']
+            
+            # 安全检查：防止配置文件里还是 0
+            if lambda_perc == 0.0:
+                print("警告: 强制开启感知损失")
+                lambda_perc = 0.1
+            
+            total_loss_G = (lambda_perc * loss_stft) + \
                      (config['training']['lambda_loc'] * loss_loc) + \
-                     (lambda_msg_current * loss_msg)
+                     (lambda_msg_current * loss_msg) + \
+                     (100.0 * loss_res_energy)  # 给一个大权重(100.0)压制水印幅度
                      
             if use_discriminator:
                 total_loss_G += config['training'].get('lambda_adv', 0.5) * loss_adv
@@ -748,9 +776,31 @@ def train(config_path, resume_checkpoint=None):
                 file_logger.info("所有阶段验证完成 ✓")
                 file_logger.info("=" * 80)
             else:
-                # 正常模式：只验证stage3（完整攻击）
+                # 正常模式：验证时使用与训练相同的阶段（保证一致性）
                 val_losses = {'total': 0, 'stft': 0, 'loc': 0, 'msg': 0, 'sem': 0, 'msg_acc': 0}
                 val_samples = 0
+                
+                # 确定验证阶段（与训练阶段保持一致）
+                if test_mode:
+                    if epoch == 0:
+                        val_stage = 'stage1'
+                    elif epoch <= 2:
+                        val_stage = 'stage2'
+                    else:
+                        val_stage = 'stage3'
+                else:
+                    use_curriculum = config.get('training', {}).get('curriculum', {}).get('enabled', False)
+                    if use_curriculum:
+                        stage1_epochs = config.get('training', {}).get('curriculum', {}).get('stage1_epochs', 66)
+                        stage2_epochs = config.get('training', {}).get('curriculum', {}).get('stage2_epochs', 66)
+                        if epoch < stage1_epochs:
+                            val_stage = 'stage1'
+                        elif epoch < stage1_epochs + stage2_epochs:
+                            val_stage = 'stage2'
+                        else:
+                            val_stage = 'stage3'
+                    else:
+                        val_stage = 'stage3'  # 默认使用完整攻击
                 
                 with torch.no_grad():
                     max_val_steps = 10
@@ -769,9 +819,12 @@ def train(config_path, resume_checkpoint=None):
                         
                         audio_wm, _, _ = generator(audio_real, msg)
                         
-                        # 验证时使用stage3（完整攻击）
-                        val_stage = 'stage3'
-                        audio_attacked = attack_layer(audio_wm, global_step=global_step, training_stage=val_stage)
+                        # 验证时使用与训练相同的阶段（保证一致性）
+                        # 阶段化攻击：在 stage1 关闭攻击，与训练保持一致
+                        if val_stage == 'stage1':
+                            audio_attacked = audio_wm
+                        else:
+                            audio_attacked = attack_layer(audio_wm, global_step=global_step, training_stage=val_stage)
                         
                         detector_output = detector(audio_attacked)
                         if len(detector_output) == 4:
@@ -787,6 +840,28 @@ def train(config_path, resume_checkpoint=None):
                         # 计算验证准确率
                         msg_pred = (torch.sigmoid(msg_logits) > 0.5).float()
                         msg_acc = (msg_pred == msg).float().mean().item()
+                        
+                        # 诊断信息：检查 logits 分布（仅在第一个验证样本时打印）
+                        if val_step == 0:
+                            msg_logits_mean = msg_logits.mean().item()
+                            msg_logits_std = msg_logits.std().item()
+                            msg_logits_min = msg_logits.min().item()
+                            msg_logits_max = msg_logits.max().item()
+                            msg_probs = torch.sigmoid(msg_logits)
+                            msg_probs_mean = msg_probs.mean().item()
+                            # 计算每个位的准确率
+                            bit_acc = (msg_pred == msg).float().mean(dim=0)  # (bits,)
+                            bit_acc_mean = bit_acc.mean().item()
+                            bit_acc_min = bit_acc.min().item()
+                            bit_acc_max = bit_acc.max().item()
+                            
+                            print(f"\n[验证诊断] Step {val_step}:")
+                            print(f"  Logits: 均值={msg_logits_mean:.4f}, 标准差={msg_logits_std:.4f}, "
+                                  f"范围=[{msg_logits_min:.2f}, {msg_logits_max:.2f}]")
+                            print(f"  Probs:  均值={msg_probs_mean:.4f} (应该接近0.5)")
+                            print(f"  ACC:    整体={msg_acc:.4f}, 逐位均值={bit_acc_mean:.4f}, "
+                                  f"范围=[{bit_acc_min:.4f}, {bit_acc_max:.4f}]")
+                            print(f"  Loss:   Msg={loss_msg.item():.4f} (未加权)")
                         
                         # 语义一致性损失（如果启用）
                         loss_sem = 0
@@ -819,7 +894,7 @@ def train(config_path, resume_checkpoint=None):
                             )
                 
                 avg_val_losses = {k: v / val_samples for k, v in val_losses.items()}
-                val_info = (f"Validation - Loss: {avg_val_losses['total']:.4f}, "
+                val_info = (f"Validation [{val_stage}] - Loss: {avg_val_losses['total']:.4f}, "
                            f"STFT: {avg_val_losses['stft']:.4f}, "
                            f"Loc: {avg_val_losses['loc']:.4f}, "
                            f"Msg: {avg_val_losses['msg']:.4f}, "

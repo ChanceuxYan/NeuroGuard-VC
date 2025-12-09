@@ -286,12 +286,43 @@ class NeuroGuardGenerator(nn.Module):
         d3_aligned, e2_aligned = _align_pair(d3, e2)
         d2 = self.dec2(d3_aligned + e2_aligned)
         
-        # Generate Watermark Signal
+        # 1. 原始水印信号 (保持不变)
         d2_aligned, e1_aligned = _align_pair(d2, e1)
         watermark = self.tanh(self.final_conv(d2_aligned + e1_aligned))
         
-        # Additive embedding with strength control: X_w = X + α · tanh(R)
+        # 2. 对齐 (保持不变)
         x_aligned, watermark_aligned = _align_pair(x, watermark)
-        watermarked_audio = x_aligned + self.alpha * watermark_aligned
         
-        return watermarked_audio, watermark_aligned, indices
+        # 3. === 新增核心逻辑：能量掩蔽 (Energy Masking) ===
+        # 计算音频的幅度包络 (模拟人耳对响度的感知)
+        # kernel_size=400 在 16k 采样率下约为 25ms
+        energy_mask = torch.nn.functional.avg_pool1d(
+            x_aligned.abs(), 
+            kernel_size=400, 
+            stride=1, 
+            padding=200
+        )
+        
+        # 修正 padding 带来的尺寸误差
+        if energy_mask.size(-1) > x_aligned.size(-1):
+            energy_mask = energy_mask[..., :x_aligned.size(-1)]
+        
+        # 归一化并进行非线性映射
+        # 逻辑：大音量处 mask -> 1.0 (允许最大alpha嵌入)
+        #       小音量处 mask -> 0.0 (禁止嵌入)
+        energy_mask = torch.clamp(energy_mask, min=0.0, max=1.0)
+        
+        # 静音门控 (Squelch)：彻底消除背景底噪
+        # 如果局部音量低于 0.01，强制将水印置为 0
+        # energy_mask[energy_mask < 0.01] = 0.0
+        energy_mask = energy_mask * 0.8 + 0.2
+        
+        # 应用掩蔽：让水印信号跟随原始语音的起伏
+        watermark_masked = watermark_aligned * energy_mask
+        
+        # 4. === 最终叠加 ===
+        # 使用掩蔽后的水印进行叠加
+        watermarked_audio = x_aligned + self.alpha * watermark_masked
+        
+        # 返回 masked 的水印以便后续 Loss 计算使用
+        return watermarked_audio, watermark_masked, indices

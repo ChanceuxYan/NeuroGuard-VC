@@ -4,7 +4,7 @@ experiment:
   seed: 42
   sample_rate: 16000  # RVC模型常用采样率
   tensorboard_dir: "logs/tensorboard"
-  checkpoint_dir: "checkpoints"
+  checkpoint_dir: "checkpoints12.9_balance"
   # 注意：只保存best和latest模型，不保存中间checkpoint
   eval_interval: 1
   # 快速测试模式（用于验证功能和跑通流程）
@@ -14,7 +14,7 @@ experiment:
   test_max_val_samples: 20  # 测试模式下验证集最大样本数
   # 注意：测试模式会自动使用5个epoch来测试三个阶段
   # stage1(1轮) + stage2(2轮) + stage3(2轮)，此配置项将被忽略
-  test_epochs: 2  # 已废弃，测试模式固定使用5个epoch
+  # test_epochs: 2  # 已废弃，测试模式固定使用5个epoch
 
 attack:  # 攻击层配置
   use_ddsp_proxy: true  # 是否使用DDSP代理
@@ -44,7 +44,7 @@ model:
     base_channels: 32
     message_bits: 32  # 32位水印信息
     encoder_depth: 4
-    alpha: 0.1  # 强度控制系数
+    alpha: 1.0  # 强度控制系数
     use_lstm: false  # 是否使用LSTM（可选）
     semantic:  # 语义流配置
       enabled: true  # 是否启用语义流
@@ -69,7 +69,7 @@ training:
   betas: [0.5, 0.9]
   lambda_loc: 0.2    # 定位损失权重
   lambda_msg: 100.0     # 消息解码损失权重（提高以加快收敛）
-  lambda_perceptual: 0.0 # 感知质量损失权重（多分辨率STFT）
+  lambda_perceptual: 0.1 # 感知质量损失权重（多分辨率STFT）
   lambda_adv: 0.1     # 对抗损失权重
   lambda_sem: 0.05    # 语义一致性损失权重（FSQ引入后建议调低）
                       # 原因：FSQ是有损压缩，HuBERT(X_w)与HuBERT(X)注定有一定差异
