@@ -56,6 +56,7 @@ model:
       # 能形成有效的"信息瓶颈"，过滤掉不鲁棒的高频噪声
       fsq_levels: [8, 8, 8, 8, 8]
   detector:
+    input_channels: 1
     output_channels: 33 # 1个定位掩码 + 32个消息位
     use_temporal_aggregation: true  # 是否使用时序聚合模块（局部解码）
     aggregation_type: "attention"  # "attention" 或 "softmax"
@@ -67,7 +68,7 @@ training:
   lr_gen: 2.0e-4
   lr_det: 2.0e-4  # 提高detector学习率以加快消息解码收敛
   betas: [0.5, 0.9]
-  lambda_loc: 0.2    # 定位损失权重
+  lambda_loc: 1.0    # 定位损失权重
   lambda_msg: 100.0     # 消息解码损失权重（提高以加快收敛）
   lambda_perceptual: 0.1 # 感知质量损失权重（多分辨率STFT）
   lambda_adv: 0.1     # 对抗损失权重
@@ -84,8 +85,8 @@ training:
   # 阶段化消息解码损失权重（可选，用于课程学习）
   stage_lambda_msg:  # 如果启用，会在不同阶段使用不同的消息解码损失权重
     stage1: 100.0  # 早期阶段更关注消息解码
-    stage2: 10.0  # 中期阶段
-    stage3: 10.0  # 后期阶段（更关注鲁棒性）
+    stage2: 50.0  # 中期阶段
+    stage3: 20.0  # 后期阶段（更关注鲁棒性）
   curriculum:  # 课程学习策略
     enabled: true  # 是否启用课程学习
     stage1_epochs: 66  # 阶段I: 基础建立（约1/3）

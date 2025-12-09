@@ -40,6 +40,8 @@ def train(config_path, resume_checkpoint=None):
     # Models
     generator = NeuroGuardGenerator(config).to(device)
     detector = NeuroGuardDetector(config).to(device)
+    detector.semantic_extractor = generator.semantic_extractor
+    print("Shared Semantic Extractor between Generator and Detector to save memory.")
     attack_layer = AttackLayer(config).to(device)
 
     # Discriminators (optional, for adversarial training)
@@ -428,21 +430,15 @@ def train(config_path, resume_checkpoint=None):
             
             # --- Loss Calculation ---
             
-            # A. 感知损失 (STFT)
+            # A. 感知损失
             loss_stft = stft_criterion(audio_wm, audio_real)
             
-            # 新增：残差能量惩罚 (Residual Penalty)
-            # watermark_res 是 generator 返回的第二个变量 (即 watermark_masked)
-            # 这一项迫使 Generator "能省则省"，用最小的能量传达信息
-            # loss_res_energy = torch.mean(watermark_res ** 2)
-            loss_res_energy = 0
-            
             # B. Generator的消息解码损失
-            # 注意：detector处于eval模式（参数固定），但audio_attacked保持梯度
-            # 这样梯度可以流回generator，但不会更新detector参数，避免训练冲突
-            # Localization Target: All 1s for watermarked audio
-            target_loc = torch.ones_like(loc_logits)
-            loss_loc = bce_criterion(loc_logits, target_loc)  # 标量损失
+            # [关键修改] 处理定位损失的尺寸不匹配问题
+            # Detector 输出的 loc_logits 是 (B, 1, T_sem)，而 audio 是 (B, 1, T_wav)
+            # 我们只需要生成一个全 1 的 target，尺寸与 loc_logits 一致即可
+            target_loc = torch.ones_like(loc_logits) 
+            loss_loc = bce_criterion(loc_logits, target_loc)
             
             # Message Target (计算每个样本的损失，用于Hard Example Mining)
             loss_msg_per_sample = bce_criterion_none(msg_logits, msg)  # (B, L)
@@ -525,7 +521,8 @@ def train(config_path, resume_checkpoint=None):
             else:
                 loc_logits_det, msg_logits_det = detector_output_det
             
-            target_loc_det = torch.ones_like(loc_logits_det)
+            # [关键修改] 同样在这里适配尺寸
+            target_loc_det = torch.ones_like(loc_logits_det) # 这里的全1 target 匹配语义层长度
             loss_loc_det = bce_criterion(loc_logits_det, target_loc_det)
             loss_msg_det = bce_criterion(msg_logits_det, msg)
             total_loss_D = loss_loc_det + loss_msg_det
