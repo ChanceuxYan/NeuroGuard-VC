@@ -71,6 +71,10 @@ class NeuroGuardDetector(nn.Module):
         # 注意：虽然 extractor 是冻结的，但 x.requires_grad=True，
         # 所以梯度可以穿过 extractor 回传给 x，从而指导 Generator。
         # features: (B, sem_dim, T_sem)
+        if x.dim() == 3 and x.shape[1] == 1:
+            x_in = x.squeeze(1)
+        else:
+            x_in = x
         features = self.semantic_extractor(x)
         
         # 2. 解码过程
