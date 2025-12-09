@@ -1,0 +1,100 @@
+# 针对VCTK-16k数据集的超参数配置
+experiment:
+  name: "NeuroGuard_VCTK_16k_Base"
+  seed: 42
+  sample_rate: 16000  # RVC模型常用采样率
+  tensorboard_dir: "logs/tensorboard"
+  checkpoint_dir: "checkpoints"
+  # 注意：只保存best和latest模型，不保存中间checkpoint
+  eval_interval: 1
+  # 快速测试模式（用于验证功能和跑通流程）
+  test_mode: false  # 设置为true启用快速测试
+  test_batch_size: 2  # 测试模式下的batch size
+  test_max_samples: 100  # 测试模式下训练集最大样本数
+  test_max_val_samples: 20  # 测试模式下验证集最大样本数
+  # 注意：测试模式会自动使用5个epoch来测试三个阶段
+  # stage1(1轮) + stage2(2轮) + stage3(2轮)，此配置项将被忽略
+  test_epochs: 2  # 已废弃，测试模式固定使用5个epoch
+
+attack:  # 攻击层配置
+  use_ddsp_proxy: true  # 是否使用DDSP代理
+  use_vae_proxy: true  # 是否使用VAE代理
+  attack_probs:  # 攻击概率分布
+    no_attack: 0.2
+    noise: 0.2
+    scaling: 0.2
+    masking: 0.2
+    vc_proxy: 0.2
+
+data:
+  # 使用CSV文件模式（优先）
+  train_csv: "/home/yanjunzhe/project/WM-V1/data/csvs/train.csv"
+  val_csv: "/home/yanjunzhe/project/WM-V1/data/csvs/val.csv"
+  # 或者使用目录模式（如果CSV未提供）
+  root_path: "./dataset/VCTK-Corpus/wav48"
+  target_sr: 16000
+  segment_length: 48000 # 2秒切片用于训练
+  train_split: 0.9
+  batch_size: 8
+  num_workers: 8
+
+model:
+  generator:
+    input_channels: 1
+    base_channels: 32
+    message_bits: 32  # 32位水印信息
+    encoder_depth: 4
+    alpha: 0.1  # 强度控制系数
+    use_lstm: false  # 是否使用LSTM（可选）
+    semantic:  # 语义流配置
+      enabled: true  # 是否启用语义流
+      model_type: "hubert"  # "hubert" 或 "wav2vec2"
+      model_name: null  # 模型名称，null使用默认
+      # FSQ 瓶颈层配置 [cite: FSQ论文]
+      # levels=[8,8,8,8,8]: 5维特征空间，每维8级，总状态数 8^5 = 32,768
+      # 这个容量足够承载语音内容 + 水印，同时维度足够低（从768降到5），
+      # 能形成有效的"信息瓶颈"，过滤掉不鲁棒的高频噪声
+      fsq_levels: [8, 8, 8, 8, 8]
+  detector:
+    output_channels: 33 # 1个定位掩码 + 32个消息位
+    use_temporal_aggregation: true  # 是否使用时序聚合模块（局部解码）
+    aggregation_type: "attention"  # "attention" 或 "softmax"
+    chunk_duration: 0.1  # 每个chunk的时长（秒）
+    use_time_freq_dual: true  # 时频双域输入（波形+梅尔频谱）
+
+training:
+  epochs: 200
+  lr_gen: 2.0e-4
+  lr_det: 2.0e-4  # 提高detector学习率以加快消息解码收敛
+  betas: [0.5, 0.9]
+  lambda_loc: 0.2    # 定位损失权重
+  lambda_msg: 100.0     # 消息解码损失权重（提高以加快收敛）
+  lambda_perceptual: 0.0 # 感知质量损失权重（多分辨率STFT）
+  lambda_adv: 0.1     # 对抗损失权重
+  lambda_sem: 0.05    # 语义一致性损失权重（FSQ引入后建议调低）
+                      # 原因：FSQ是有损压缩，HuBERT(X_w)与HuBERT(X)注定有一定差异
+                      # 如果强迫两者完全一致，模型可能会"对抗"FSQ的量化效果，导致训练不稳定
+                      # 只要L_rec和L_msg在下降，语义损失稍微高一点是可以接受的
+  # FSQ / 音频监控日志
+  fsq_log_interval: 500        # 每隔多少step记录一次FSQ索引直方图
+  audio_log_interval: 2000     # 每隔多少step记录一次音频样例（水印与原始）
+  bit_log_interval: 1000       # 逐位ACC直方图记录间隔
+  use_discriminator: false  # 是否使用对抗训练（MSD/MPD）
+  use_hard_example_mining: true  # 是否使用Hard Example Mining
+  # 阶段化消息解码损失权重（可选，用于课程学习）
+  stage_lambda_msg:  # 如果启用，会在不同阶段使用不同的消息解码损失权重
+    stage1: 100.0  # 早期阶段更关注消息解码
+    stage2: 10.0  # 中期阶段
+    stage3: 10.0  # 后期阶段（更关注鲁棒性）
+  curriculum:  # 课程学习策略
+    enabled: true  # 是否启用课程学习
+    stage1_epochs: 66  # 阶段I: 基础建立（约1/3）
+    stage2_epochs: 66  # 阶段II: 信号鲁棒（约1/3）
+    # 阶段III: 攻坚重构（剩余epochs）
+  # FSQ Warm-up 策略（可选）
+  # 注意：FSQ的STE机制通常很稳定，通常不需要特殊的warm-up
+  # 如果发现训练不稳定（Loss不降），可以启用此选项
+  fsq_warmup:
+    enabled: false  # 是否启用FSQ warm-up
+    warmup_steps: 2000  # Warm-up步数（前N个step）
+    fsq_lr_multiplier: 2.0  # FSQ投影层学习率倍数（project_in和project_out）

@@ -1,0 +1,26 @@
+# NeuroGuard-VC Base Configuration
+experiment:
+  name: "NeuroGuard_Base_Run"
+  project: "neuroguard-vc"
+  seed: 1234
+  tensorboard_dir: "logs/tensorboard"
+  checkpoint_dir: "checkpoints"
+  save_interval: 5
+  eval_interval: 1
+
+model:
+  sample_rate: 16000
+  latent_dim: 128
+  
+optimizer:
+  lr_gen: 2.0e-4
+  lr_disc: 2.0e-4
+  betas: [0.5, 0.9]
+  decay: 0.999
+
+loss_weights:
+  lambda_adv: 1.0      # 对抗损失 (HiFi-GAN)
+  lambda_feat: 10.0    # 特征匹配损失 (Feature Matching)
+  lambda_rec: 45.0     # Mel频谱重构损失
+  lambda_loc: 10.0     # 水印定位损失
+  lambda_msg: 1.0      # 水印消息解码损失

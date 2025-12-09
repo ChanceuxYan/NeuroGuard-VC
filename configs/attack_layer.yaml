@@ -1,0 +1,40 @@
+# Differentiable Attack Layer Configuration
+# 训练时使用的可微增强，用于模拟RVC和信道失真
+
+enable: true
+probability: 0.8  # 应用攻击的全局概率
+
+attacks:
+  # 1. 信号类攻击 (Signal Processing)
+  noise:
+    prob: 0.5
+    min_snr_db: 10.0
+    max_snr_db: 40.0
+  
+  gain:
+    prob: 0.3
+    min_gain_db: -10.0
+    max_gain_db: 5.0
+
+  # 2. 编解码模拟 (Codec Simulation)
+  # 使用Dropout和量化噪声模拟MP3/Opus
+  codec_proxy:
+    prob: 0.4
+    dropout_rate: 0.1
+    quantization_levels: 32
+
+  # 3. 时频域遮挡 (Time-Freq Masking)
+  # 模拟剪辑和丢包
+  masking:
+    prob: 0.3
+    time_mask_percentage: 0.15
+    freq_mask_percentage: 0.15
+
+  # 4. 关键：RVC 代理攻击 (RVC Proxy)
+  # 模拟相位重置和声码器重构
+  rvc_proxy:
+    prob: 0.4
+    hop_length: 160  # 10ms for 16k
+    n_mels: 64
+    use_griffin_lim: true  # 破坏相位
+    n_iter: 2 # 少量迭代以保持梯度流

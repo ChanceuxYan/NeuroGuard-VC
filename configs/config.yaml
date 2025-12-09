@@ -1,0 +1,109 @@
+# config.yaml
+# NeuroGuard-VC 系统核心配置文件
+# ----------------------------------------------------------
+# 本文件定义了数据加载、模型架构、训练动态及信号处理的所有关键参数。
+# 严禁随意修改 FFT 参数，否则会导致声码器出现的棋盘格伪影。
+
+data:
+  # 数据集路径配置
+  training_files: "filelists/ljs_audio_text_train_filelist.txt"
+  validation_files: "filelists/ljs_audio_text_val_filelist.txt"
+  
+  # 文本处理参数（如果集成前端 TTS）
+  text_cleaners: ["english_cleaners2"]
+  
+  # 音频信号参数
+  max_wav_value: 32768.0       # 16-bit PCM 的最大幅值
+  sampling_rate: 22050         # 目标采样率，标准高保真语音配置
+  filter_length: 1024          # STFT 滤波器长度 (N_FFT)
+  hop_length: 256              # 帧移，必须与生成器的上采样率乘积严格匹配
+  win_length: 1024             # 窗长，通常等于 N_FFT
+  n_mel_channels: 80           # 梅尔滤波器组通道数
+  mel_fmin: 0.0                # 梅尔频段下限
+  mel_fmax: 8000.0             # 梅尔频段上限，None 表示 sampling_rate / 2
+  
+  # 数据增强与加载
+  add_blank: True
+  n_speakers: 0                # 单人模型设为 0，多人模型设为 > 0
+  cleaned_text: True
+
+train:
+  # 训练超参数
+  seed: 1234
+  epochs: 20000                # 总训练轮次
+  learning_rate: 0.0002        # 初始学习率
+  betas: [0.8, 0.99]           # AdamW 优化器的 Beta 参数
+  eps: 1.0e-9                  # AdamW 优化器的 Epsilon
+  batch_size: 16               # 根据 GPU 显存调整，建议不小于 16
+  fp16_run: True               # 开启混合精度训练 (AMP)
+  lr_decay: 0.999875           # 学习率指数衰减系数
+  segment_size: 8192           # 训练时的切片长度 (samples)，约 370ms
+  init_lr_ratio: 1
+  warmup_epochs: 0             # 预热轮次
+  c_mel: 45.0                  # 梅尔谱重建损失的权重 (L1 Loss)
+  c_kl: 1.0                    # KL 散度权重 (若使用变分推断)
+  
+  # 梯度裁剪与检查点
+  max_grad_norm: 1.0           # 梯度裁剪阈值
+  checkpoint_interval: 5000    # 保存模型的步数间隔
+  eval_interval: 1000          # 验证集评估间隔
+  logging_interval: 100        # 日志记录间隔
+
+model:
+  # 生成器架构参数
+  inter_channels: 192          # 中间层通道数
+  hidden_channels: 192         # 隐藏层通道数
+  filter_channels: 768         # 卷积滤波器通道数
+  n_heads: 2                   # 注意力头数 (若适用)
+  n_layers: 6                  # 层数
+  kernel_size: 3               # 基础卷积核大小
+  p_dropout: 0.1               # Dropout 概率
+  
+  # 残差块配置 (HiFi-GAN V1 核心配置)
+  resblock: "1"                # 残差块类型
+  resblock_kernel_sizes: [1, 2, 3] # 多感受野卷积核
+  resblock_dilation_sizes: [[4, 1, 5], [4, 1, 5], [4, 1, 5]] # 膨胀系数
+  
+  # 上采样配置 - 关键部分
+  # 8 * 8 * 2 * 2 = 256，必须严格等于 hop_length
+  upsample_rates: [8, 8, 2, 2] 
+  upsample_initial_channel: 512
+  upsample_kernel_sizes: [16, 16, 4, 4]
+  
+  n_layers_q: 3
+  use_spectral_norm: False     # 生成器通常使用 Weight Norm 而非 Spectral Norm
+  gin_channels: 0              # 说话人嵌入维度
+
+discriminator:
+  # 多尺度判别器 (MSD) 参数
+  msd_scales: 3
+  msd_downsample_pooling: "AvgPool1d"
+  msd_downsample_params:
+    kernel_size: 4
+    stride: 2
+    padding: 2
+  
+  # 多周期判别器 (MPD) 参数
+  mpd_periods: [6, 1, 5, 2, 3] # 质数周期以避免谐波重叠
+  
+  # 通道与归一化
+  discriminator_channel_mult: 1
+  use_spectral_norm: True      # 判别器强烈建议使用谱归一化以稳定 GAN 训练
+
+robustness:
+  # 评估模块配置 (eval_robustness.py 使用)
+  eval_samples: 100
+  metrics: ["pesq", "stoi", "ber", "snr"]
+  attacks:
+    - name: "gaussian_noise"
+      params: 
+        snr_db: [7, 8, 9]
+    - name: "mp3_compression"
+      params: 
+        bitrate: ["64k", "128k", "192k"]
+    - name: "resampling"
+      params: 
+        target_sr: 
+    - name: "dropout"
+      params:
+        p: 0.05
