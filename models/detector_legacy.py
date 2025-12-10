@@ -184,3 +184,4 @@ class NeuroGuardDetectorLegacy(nn.Module):
             
         return loc_logits, msg_logits, local_logits, attention_weights
 
+

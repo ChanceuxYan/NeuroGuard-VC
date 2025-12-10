@@ -70,9 +70,9 @@ training:
   betas: [0.5, 0.9]
   lambda_loc: 1.0    # 定位损失权重
   lambda_msg: 100.0     # 消息解码损失权重（提高以加快收敛）
-  lambda_perceptual: 0.1 # 感知质量损失权重（多分辨率STFT）
+  lambda_perceptual: 0.01 # 感知质量损失权重（多分辨率STFT）
   lambda_adv: 0.1     # 对抗损失权重
-  lambda_sem: 0.05    # 语义一致性损失权重（FSQ引入后建议调低）
+  lambda_sem: 0.03    # 语义一致性损失权重（FSQ引入后建议调低）
                       # 原因：FSQ是有损压缩，HuBERT(X_w)与HuBERT(X)注定有一定差异
                       # 如果强迫两者完全一致，模型可能会"对抗"FSQ的量化效果，导致训练不稳定
                       # 只要L_rec和L_msg在下降，语义损失稍微高一点是可以接受的
