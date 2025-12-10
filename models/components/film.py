@@ -6,8 +6,9 @@ class FiLMLayer1D(nn.Module):
     Feature-wise Linear Modulation (FiLM) for 1D Audio Features.
     Applies gamma(m) * x + beta(m)
     
-    This implementation includes 'Aggressive Initialization' to overcome
-    the 'Dead Zone' problem in FSQ/VQ quantization.
+    [最终修正版] 
+    移除针对 FSQ 的激进初始化，回归"恒等映射"初始化。
+    这是打通 Generator 梯度的关键。
     """
     def __init__(self, in_channels, msg_dim):
         super().__init__()
@@ -17,56 +18,35 @@ class FiLMLayer1D(nn.Module):
         self.gamma_fc = nn.Linear(msg_dim, in_channels)
         self.beta_fc = nn.Linear(msg_dim, in_channels)
         
-        # 应用初始化策略
         self._init_weights()
         
     def _init_weights(self):
         """
-        初始化权重。
-        
-        CRITICAL CHANGE:
-        对于 FSQ/VQ 任务，如果 beta 初始化太小（如 std=0.02），产生的位移不足以跨越
-        量化边界（Quantization Boundary），导致梯度消失，模型陷入“恒等映射”。
-        
-        此处采用 Aggressive Initialization：
-        - Beta std: 0.5 (足以产生跨越 FSQ 格子的位移)
-        - Gamma std: 0.1 (提供足够的缩放动力)
+        初始化策略：接近恒等映射 (Identity Mapping)
+        让初始输出 gamma ≈ 1, beta ≈ 0
+        这样 Generator 就不会觉得语义特征是"噪音"而将其丢弃。
         """
-        # --- Gamma (Scale) ---
-        # 均值为 1.0 (保持特征幅度)，std 设为 0.1 以引入缩放扰动
-        nn.init.normal_(self.gamma_fc.weight, mean=0.0, std=0.1)
+        # Gamma (Scale): weight=0, bias=1 -> initial output = 1.0
+        nn.init.zeros_(self.gamma_fc.weight)
         nn.init.constant_(self.gamma_fc.bias, 1.0)
         
-        # --- Beta (Shift) ---
-        # 均值为 0.0，但 std 增大到 0.5。
-        # 这意味着初始的偏移量有很大几率落在 [-0.5, 0.5] 之外，
-        # 强行推动特征进入相邻的 FSQ 量化区间。
-        nn.init.normal_(self.beta_fc.weight, mean=0.0, std=0.5)
+        # Beta (Shift): weight=0, bias=0 -> initial output = 0.0
+        # 给一个极小的扰动 (1e-4) 打破对称性，但这比之前的 0.5 小了 5000 倍！
+        nn.init.normal_(self.beta_fc.weight, mean=0.0, std=1e-4)
         nn.init.constant_(self.beta_fc.bias, 0.0)
 
     def forward(self, x, msg):
-        """
-        Args:
-            x: Input features. Shape [Batch, Time, Channels] (e.g., HuBERT features)
-               OR [Batch, Channels] if global.
-            msg: Watermark message. Shape [Batch, msg_dim]
-            
-        Returns:
-            Modulated features with same shape as x.
-        """
-        # 1. 生成调制参数 [Batch, Channels]
+        # 1. 生成调制参数
         gamma = self.gamma_fc(msg)
         beta = self.beta_fc(msg)
         
-        # 2. 维度对齐 (Broadcasting)
+        # 2. 维度对齐
         if x.dim() == 3:
-            if x.shape[1] == self.in_channels:
-                # 形状为 [B, C, T]，在时间维上广播
-                gamma = gamma.unsqueeze(2)  # [B, C, 1]
+            if x.shape[1] == self.in_channels: # [B, C, T]
+                gamma = gamma.unsqueeze(2)
                 beta = beta.unsqueeze(2)
-            else:
-                # 假定形状为 [B, T, C]，在时间维前广播
-                gamma = gamma.unsqueeze(1)  # [B, 1, C]
+            else: # [B, T, C]
+                gamma = gamma.unsqueeze(1)
                 beta = beta.unsqueeze(1)
 
         # 3. 应用仿射变换

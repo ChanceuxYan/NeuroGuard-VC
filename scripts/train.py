@@ -17,6 +17,7 @@ import torchaudio
 
 from models.generator import NeuroGuardGenerator
 from models.detector import NeuroGuardDetector
+
 from models.discriminators import MultiScaleDiscriminator, MultiPeriodDiscriminator
 from modules.attack import AttackLayer
 from modules.losses import MultiResolutionSTFTLoss, SemanticConsistencyLoss
@@ -84,14 +85,30 @@ def save_training_plots(history, save_dir):
         print(f"Error saving plot: {e}")
     plt.close()
 
-def train(config_path, resume_checkpoint=None):
+def train(config_path, resume_checkpoint=None, debug_overfit=False, debug_single_batch_steps=None):
     # Load Config
     with open(config_path, "r") as f:
         config = yaml.safe_load(f)
 
     # Device
-    device = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
+
+    # Debug overfit: 使用极小子集、stage1-only、无攻击/HEM/判别器
+    if debug_overfit:
+        print("=" * 80)
+        print("DEBUG OVERFIT MODE: stage1 only, no attack/HEM/discriminator, small subset")
+        print("=" * 80)
+        config.setdefault('training', {})
+        config.setdefault('experiment', {})
+        config['training']['use_discriminator'] = False
+        config['training']['use_hard_example_mining'] = False
+        config['training']['lambda_adv'] = 0.0
+        config['training']['epochs'] = 1
+        # 关闭 curriculum，强制 stage1
+        config['training']['curriculum'] = {'enabled': False}
+        # 确保 eval_interval 存在
+        config['experiment']['eval_interval'] = 1
     
     # Create directories
     os.makedirs(config.get('experiment', {}).get('checkpoint_dir', 'checkpoints'), exist_ok=True)
@@ -117,6 +134,8 @@ def train(config_path, resume_checkpoint=None):
 
     # Discriminators (optional, for adversarial training)
     use_discriminator = config.get('training', {}).get('use_discriminator', False)
+    if debug_overfit:
+        use_discriminator = False
     if use_discriminator:
         msd = MultiScaleDiscriminator().to(device)
         mpd = MultiPeriodDiscriminator(use_spectral_norm=True).to(device)
@@ -176,6 +195,8 @@ def train(config_path, resume_checkpoint=None):
     
     # Hard Example Mining (可选)
     use_hard_example = config.get('training', {}).get('use_hard_example_mining', True)
+    if debug_overfit:
+        use_hard_example = False
     if use_hard_example:
         hard_example_miner = HardExampleMiner(
             top_k_ratio=0.3,
@@ -258,6 +279,15 @@ def train(config_path, resume_checkpoint=None):
         train_csv=data_config.get('train_csv'),
         val_csv=data_config.get('val_csv')
     )
+
+    # Debug overfit: 使用极小子集/小batch/单线程
+    if debug_overfit:
+        debug_train_size = min(8, len(dataset))
+        debug_val_size = min(4, len(val_dataset))
+        dataset = torch.utils.data.Subset(dataset, list(range(debug_train_size)))
+        val_dataset = torch.utils.data.Subset(val_dataset, list(range(debug_val_size)))
+        data_config['batch_size'] = min(2, debug_train_size)
+        data_config['num_workers'] = 0
     
     # 测试模式下限制验证集大小
     if test_mode:
@@ -279,6 +309,9 @@ def train(config_path, resume_checkpoint=None):
     # 根据测试模式选择batch size
     batch_size = test_batch_size if test_mode else config['data']['batch_size']
     num_workers = 0 if test_mode else config['data'].get('num_workers', 4)
+    if debug_overfit:
+        batch_size = data_config['batch_size']
+        num_workers = 0
     
     dataloader = DataLoader(
         dataset, 
@@ -335,7 +368,9 @@ def train(config_path, resume_checkpoint=None):
         
         epoch_losses = {'total': 0, 'stft': 0, 'loc': 0, 'msg': 0, 'adv': 0, 'sem': 0, 'msg_acc': 0}
         
-        if test_mode:
+        if debug_overfit:
+            current_training_stage = 'stage1'
+        elif test_mode:
             if epoch == 0: current_training_stage = 'stage1'
             elif epoch <= 2: current_training_stage = 'stage2'
             else: current_training_stage = 'stage3'
@@ -364,10 +399,30 @@ def train(config_path, resume_checkpoint=None):
         file_logger.info(epoch_info)
         file_logger.info("=" * 80)
         
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config['training']['epochs']} [{current_training_stage}]", 
-                    leave=True, mininterval=0.1, maxinterval=1.0)
+        # Debug: reuse single batch for N steps
+        if debug_single_batch_steps:
+            if 'cached_debug_batch' not in locals():
+                try:
+                    cached_debug_batch = next(iter(dataloader))
+                except StopIteration:
+                    print("No data available for debug_single_batch_steps.")
+                    break
+            pbar_iter = tqdm(range(debug_single_batch_steps), desc=f"Epoch {epoch+1} [debug_single_batch]", leave=True, mininterval=0.1, maxinterval=1.0)
+            def get_batch():
+                return cached_debug_batch
+        else:
+            pbar_iter = tqdm(dataloader, desc=f"Epoch {epoch+1}/{config['training']['epochs']} [{current_training_stage}]", 
+                             leave=True, mininterval=0.1, maxinterval=1.0)
+            def get_batch():
+                return next_batch
         
-        for step, audio_real in enumerate(pbar):
+        for step, batch in enumerate(pbar_iter):
+            if debug_single_batch_steps:
+                audio_real = get_batch()
+            else:
+                next_batch = batch
+                audio_real = get_batch()
+
             audio_real = audio_real.to(device)
             # Fix: extract batch size correctly
             if len(audio_real.shape) == 3:  # (B, C, T)
@@ -387,7 +442,9 @@ def train(config_path, resume_checkpoint=None):
             # audio_wm.retain_grad()
             
             # 3. 施加攻击
-            if test_mode:
+            if debug_overfit:
+                training_stage = 'stage1'
+            elif test_mode:
                 if epoch == 0: training_stage = 'stage1'
                 elif epoch <= 2: training_stage = 'stage2'
                 else: training_stage = 'stage3'
@@ -402,7 +459,7 @@ def train(config_path, resume_checkpoint=None):
                 else:
                     training_stage = 'stage3'
             
-            if training_stage == 'stage1':
+            if training_stage == 'stage1' or debug_overfit:
                 audio_attacked = audio_wm
             else:
                 audio_attacked = attack_layer(audio_wm, global_step=global_step, training_stage=training_stage)
@@ -485,7 +542,7 @@ def train(config_path, resume_checkpoint=None):
                 loss_sem = semantic_loss_criterion(audio_real, audio_wm)
             
             lambda_perc = config['training']['lambda_perceptual']
-            if lambda_perc == 0.0: lambda_perc = 0.1
+            # if lambda_perc == 0.0: lambda_perc = 0.1
             
             total_loss_G = (lambda_perc * loss_stft) + \
                      (config['training']['lambda_loc'] * loss_loc) + \
@@ -573,8 +630,8 @@ def train(config_path, resume_checkpoint=None):
                 'Msg': f"{avg_losses['msg']:.4f}",
                 'Acc': f"{avg_losses.get('msg_acc', 0.0):.3f}"
             }
-            pbar.set_postfix(postfix_dict)
-            pbar.update(1)
+            pbar_iter.set_postfix(postfix_dict)
+            pbar_iter.update(1)
             
             # [新增] 收集历史数据
             if step % 100 == 0:
@@ -607,7 +664,7 @@ def train(config_path, resume_checkpoint=None):
             generator.eval()
             detector.eval()
             
-            if test_mode:
+            if test_mode and (not debug_overfit):
                 # 测试模式：验证所有三个阶段，确保所有模块都正常工作
                 val_stages = ['stage1', 'stage2', 'stage3']
                 stage_val_results = {}
@@ -722,13 +779,82 @@ def train(config_path, resume_checkpoint=None):
                 file_logger.info("=" * 80)
                 file_logger.info("所有阶段验证完成 ✓")
                 file_logger.info("=" * 80)
+            elif debug_overfit:
+                # Debug: 仅 stage1、无攻击
+                val_stage = 'stage1'
+                val_losses = {'total': 0, 'stft': 0, 'loc': 0, 'msg': 0, 'sem': 0, 'msg_acc': 0}
+                val_samples = 0
+                with torch.no_grad():
+                    for val_step, audio_real in enumerate(val_dataloader):
+                        audio_real = audio_real.to(device)
+                        if len(audio_real.shape) == 2:
+                            audio_real = audio_real.unsqueeze(1)
+                        if audio_real.shape[1] != 1:
+                            audio_real = audio_real[:, 0:1, :]
+                        
+                        B = audio_real.shape[0]
+                        msg = torch.randint(0, 2, (B, config['model']['generator']['message_bits'])).float().to(device)
+                        
+                        audio_wm, _, _ = generator(audio_real, msg)
+                        audio_attacked = audio_wm  # no attack
+                        
+                        detector_output = detector(audio_attacked)
+                        if len(detector_output) == 4:
+                            loc_logits, msg_logits, _, _ = detector_output
+                        else:
+                            loc_logits, msg_logits = detector_output
+                        
+                        loss_stft = stft_criterion(audio_wm, audio_real)
+                        target_loc = torch.ones_like(loc_logits)
+                        loss_loc = bce_criterion(loc_logits, target_loc)
+                        loss_msg = bce_criterion(msg_logits, msg)
+                        
+                        msg_pred = (torch.sigmoid(msg_logits) > 0.5).float()
+                        msg_acc = (msg_pred == msg).float().mean().item()
+                        
+                        loss_sem = 0
+                        if semantic_loss_criterion is not None:
+                            loss_sem = semantic_loss_criterion(audio_real, audio_wm)
+                        
+                        total_loss = (config['training']['lambda_perceptual'] * loss_stft) + \
+                                    (config['training']['lambda_loc'] * loss_loc) + \
+                                    (config['training']['lambda_msg'] * loss_msg)
+                        if semantic_loss_criterion is not None:
+                            total_loss += config['training'].get('lambda_sem', 0.1) * loss_sem
+                        
+                        val_losses['total'] += total_loss.item()
+                        val_losses['stft'] += loss_stft.item()
+                        val_losses['loc'] += loss_loc.item()
+                        val_losses['msg'] += loss_msg.item()
+                        val_losses['msg_acc'] += msg_acc
+                        if semantic_loss_criterion is not None:
+                            val_losses['sem'] += loss_sem.item()
+                        val_samples += 1
+                
+                if val_samples > 0:
+                    avg_val_losses = {k: v / val_samples for k, v in val_losses.items()}
+                else:
+                    avg_val_losses = {k: 0 for k in val_losses.keys()}
+                
+                val_info = (f"Validation [{val_stage}] - Loss: {avg_val_losses['total']:.4f}, "
+                           f"STFT: {avg_val_losses['stft']:.4f}, "
+                           f"Loc: {avg_val_losses['loc']:.4f}, "
+                           f"Msg: {avg_val_losses['msg']:.4f}, "
+                           f"Acc: {avg_val_losses.get('msg_acc', 0.0):.3f}")
+                if semantic_loss_criterion is not None and 'sem' in avg_val_losses:
+                    val_info += f", Sem: {avg_val_losses['sem']:.4f}"
+                print(f"\n{val_info}")
+                file_logger.info(val_info)
+            
             else:
                 # 正常模式：验证时使用与训练相同的阶段（保证一致性）
                 val_losses = {'total': 0, 'stft': 0, 'loc': 0, 'msg': 0, 'sem': 0, 'msg_acc': 0}
                 val_samples = 0
                 
                 # 确定验证阶段（与训练阶段保持一致）
-                if test_mode:
+                if debug_overfit:
+                    val_stage = 'stage1'
+                elif test_mode:
                     if epoch == 0:
                         val_stage = 'stage1'
                     elif epoch <= 2:
@@ -918,6 +1044,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, default='configs/vctk_16k.yaml', help='Path to config file')
     parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
+    parser.add_argument('--debug_overfit', action='store_true', help='Debug: small subset, stage1 only, no attack/HEM/discriminator')
+    parser.add_argument('--debug_single_batch_steps', type=int, default=None, help='Debug: reuse first batch for N steps (e.g., 2000)')
     args = parser.parse_args()
     
-    train(args.config, args.resume)
+    train(args.config, args.resume, debug_overfit=args.debug_overfit, debug_single_batch_steps=args.debug_single_batch_steps)

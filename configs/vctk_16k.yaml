@@ -4,7 +4,7 @@ experiment:
   seed: 42
   sample_rate: 16000  # RVC模型常用采样率
   tensorboard_dir: "logs/tensorboard"
-  checkpoint_dir: "checkpoints12.9_balance"
+  checkpoint_dir: "checkpoints12.10"
   # 注意：只保存best和latest模型，不保存中间checkpoint
   eval_interval: 1
   # 快速测试模式（用于验证功能和跑通流程）
@@ -28,8 +28,8 @@ attack:  # 攻击层配置
 
 data:
   # 使用CSV文件模式（优先）
-  train_csv: "/home/yanjunzhe/project/WM-V1/data/csvs/train.csv"
-  val_csv: "/home/yanjunzhe/project/WM-V1/data/csvs/val.csv"
+  train_csv: "/home/yanjunzhe/project/WM-V2/NeuroGuard-VC/data/librispeech_csvs/train.csv"
+  val_csv: "/home/yanjunzhe/project/WM-V2/NeuroGuard-VC/data/librispeech_csvs/dev.csv"
   # 或者使用目录模式（如果CSV未提供）
   root_path: "./dataset/VCTK-Corpus/wav48"
   target_sr: 16000
@@ -67,13 +67,13 @@ model:
 training:
   epochs: 200
   lr_gen: 2.0e-4
-  lr_det: 2.0e-4  # 提高detector学习率以加快消息解码收敛
+  lr_det: 5.0e-4  # 提高detector学习率以加快消息解码收敛
   betas: [0.5, 0.9]
   lambda_loc: 1.0    # 定位损失权重
   lambda_msg: 100.0     # 消息解码损失权重（提高以加快收敛）
-  lambda_perceptual: 0.01 # 感知质量损失权重（多分辨率STFT）
+  lambda_perceptual: 0.0 # 感知质量损失权重（多分辨率STFT）
   lambda_adv: 0.1     # 对抗损失权重
-  lambda_sem: 0.03    # 语义一致性损失权重（FSQ引入后建议调低）
+  lambda_sem: 0.0    # 语义一致性损失权重（FSQ引入后建议调低）
                       # 原因：FSQ是有损压缩，HuBERT(X_w)与HuBERT(X)注定有一定差异
                       # 如果强迫两者完全一致，模型可能会"对抗"FSQ的量化效果，导致训练不稳定
                       # 只要L_rec和L_msg在下降，语义损失稍微高一点是可以接受的
@@ -82,7 +82,7 @@ training:
   audio_log_interval: 2000     # 每隔多少step记录一次音频样例（水印与原始）
   bit_log_interval: 1000       # 逐位ACC直方图记录间隔
   use_discriminator: false  # 是否使用对抗训练（MSD/MPD）
-  use_hard_example_mining: true  # 是否使用Hard Example Mining
+  use_hard_example_mining: false  # 是否使用Hard Example Mining
   # 阶段化消息解码损失权重（可选，用于课程学习）
   stage_lambda_msg:  # 如果启用，会在不同阶段使用不同的消息解码损失权重
     stage1: 100.0  # 早期阶段更关注消息解码
