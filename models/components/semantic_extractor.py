@@ -20,9 +20,10 @@ class SemanticExtractor(nn.Module):
     语义特征提取器
     支持HuBERT和Wav2Vec 2.0模型
     """
-    def __init__(self, model_type='hubert', model_name=None, freeze=True):
+    def __init__(self, model_type='hubert', model_name=None, freeze=True, unfreeze_last_n_layers=0):
         super().__init__()
         self.model_type = model_type
+        self.unfreeze_last_n_layers = unfreeze_last_n_layers
         
         # 1. 路径逻辑：强制优先使用您指定的本地路径
         # 您提供的文件路径
@@ -77,6 +78,16 @@ class SemanticExtractor(nn.Module):
             self.model.eval()
             for param in self.model.parameters():
                 param.requires_grad = False
+            
+            # [新增] 策略性解冻：允许最后 N 层 Transformer 参与微调
+            # 这能显著降低 Generator 的"欺骗"难度，提升 Acc
+            if self.unfreeze_last_n_layers > 0 and hasattr(self.model, 'encoder'):
+                print(f"🔓 Unfreezing the last {self.unfreeze_last_n_layers} layers of Semantic Model...")
+                # HuBERT/Wav2Vec2 的 encoder layers 通常在 model.encoder.layers
+                layers = self.model.encoder.layers
+                for i in range(1, self.unfreeze_last_n_layers + 1):
+                    for param in layers[-i].parameters():
+                        param.requires_grad = True
     
     def train(self, mode=True):
         """

@@ -1,0 +1,36 @@
+Watermark Message (32 bits):
+01101101011011100100101100110001
+
+Bit values:
+  Bit  0: 0
+  Bit  1: 1
+  Bit  2: 1
+  Bit  3: 0
+  Bit  4: 1
+  Bit  5: 1
+  Bit  6: 0
+  Bit  7: 1
+  Bit  8: 0
+  Bit  9: 1
+  Bit 10: 1
+  Bit 11: 0
+  Bit 12: 1
+  Bit 13: 1
+  Bit 14: 1
+  Bit 15: 0
+  Bit 16: 0
+  Bit 17: 1
+  Bit 18: 0
+  Bit 19: 0
+  Bit 20: 1
+  Bit 21: 0
+  Bit 22: 1
+  Bit 23: 1
+  Bit 24: 0
+  Bit 25: 0
+  Bit 26: 1
+  Bit 27: 1
+  Bit 28: 0
+  Bit 29: 0
+  Bit 30: 0
+  Bit 31: 1

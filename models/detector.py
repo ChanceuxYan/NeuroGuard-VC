@@ -11,7 +11,8 @@ class NeuroGuardDetector(nn.Module):
         self.semantic_extractor = SemanticExtractor(
             model_type=semantic_config.get('model_type', 'hubert'),
             model_name=semantic_config.get('model_name', None),
-            freeze=True 
+            freeze=True,
+            unfreeze_last_n_layers=2 
         )
         
         sem_dim = self.semantic_extractor.get_feature_dim()
