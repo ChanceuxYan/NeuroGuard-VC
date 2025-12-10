@@ -129,19 +129,25 @@ class NeuroGuardGenerator(nn.Module):
         if use_semantic:
             self.semantic_film = FiLMLayer1D(semantic_dim, msg_dim)
         
-        # FSQ 瓶颈层 (新增核心组件) [cite: FSQ论文]
-        # dim=semantic_dim: 告诉 FSQ 输入是 768/1024 维
-        # levels=[8,8,8,8,8]: 告诉 FSQ 内部压缩到 5 维 (len(levels))
-        # FSQ 代码会自动创建 semantic_dim -> 5 的 project_in 和 5 -> semantic_dim 的 project_out
+        # FSQ 瓶颈层 [修改部分]
         if use_semantic:
-            fsq_levels = semantic_config.get('fsq_levels', [8, 8, 8, 8, 8])  # 默认5维，每维8级
-            self.fsq = FSQ(
-                levels=fsq_levels,
-                dim=semantic_dim,  # 输入维度：HuBERT的输出维度
-                num_codebooks=1
-            )
+            # 读取配置，默认为 True 以兼容旧配置，但现在我们在 yaml 里设为 False
+            self.use_fsq = semantic_config.get('use_fsq', True) 
+            
+            if self.use_fsq:
+                fsq_levels = semantic_config.get('fsq_levels', [8, 8, 8, 8, 8])
+                self.fsq = FSQ(
+                    levels=fsq_levels,
+                    dim=semantic_dim,
+                    num_codebooks=1
+                )
+                print(f"Build FSQ with levels: {fsq_levels}")
+            else:
+                self.fsq = None
+                print("FSQ is disabled by config.")
         else:
             self.fsq = None
+            self.use_fsq = False
         
         # ========== 声学流 ==========
         # 编码器路径: 降采样 16k -> latent
@@ -210,22 +216,19 @@ class NeuroGuardGenerator(nn.Module):
             # 这一步将水印 "画" 在高维语义空间中
             F_sem_modulated = self.semantic_film(F_sem, msg)  # (B, C_sem, T_sem)
             
-            # 3. FSQ 离散化 (关键修改) [cite: FSQ论文]
-            # F_modulated 被投影到低维 -> 量化 -> 投影回 semantic_dim
-            # 注意：FSQ期望输入格式为 (B, T, C)，需要转换维度
-            B, C_sem, T_sem = F_sem_modulated.shape
-            F_sem_seq = F_sem_modulated.permute(0, 2, 1)  # (B, T_sem, C_sem)
-            
-            # FSQ量化：f_modulated -> f_quantized
-            # indices: [B, T_sem]，如果你想监控离散码的使用率，可以打印它
-            F_sem_quantized, indices = self.fsq(F_sem_seq)  # (B, T_sem, C_sem), (B, T_sem)
-            
-            # 转换回Conv1d格式: (B, T_sem, C_sem) -> (B, C_sem, T_sem)
-            F_sem_quantized = F_sem_quantized.permute(0, 2, 1)  # (B, C_sem, T_sem)
-            
-            # 此时的 F_sem_quantized 已经经过了 "四舍五入" 的洗礼。
-            # 如果水印信息还能留下来，说明它已经变成了 "语义坐标" 的一部分。
-            F_sem_final = F_sem_quantized
+            # 3. FSQ 离散化 [修改部分]
+            if self.use_fsq and self.fsq is not None:
+                # --- 原有 FSQ 逻辑 ---
+                B, C_sem, T_sem = F_sem_modulated.shape
+                F_sem_seq = F_sem_modulated.permute(0, 2, 1)
+                F_sem_quantized, indices = self.fsq(F_sem_seq)
+                F_sem_final = F_sem_quantized.permute(0, 2, 1)
+            else:
+                # --- [新增] 直通逻辑 ---
+                # 不做量化，直接将含有水印的连续特征传给解码器
+                # 这样梯度可以完美回传，微弱的水印信号也能被保留
+                F_sem_final = F_sem_modulated
+                indices = None  # 没有量化索引
         else:
             F_sem_final = None
             indices = None
@@ -315,7 +318,8 @@ class NeuroGuardGenerator(nn.Module):
         # 静音门控 (Squelch)：彻底消除背景底噪
         # 如果局部音量低于 0.01，强制将水印置为 0
         # energy_mask[energy_mask < 0.01] = 0.0
-        energy_mask = energy_mask * 0.8 + 0.2
+        # energy_mask = energy_mask * 0.8 + 0.2
+        energy_mask = energy_mask ** 2
         
         # 应用掩蔽：让水印信号跟随原始语音的起伏
         watermark_masked = watermark_aligned * energy_mask
